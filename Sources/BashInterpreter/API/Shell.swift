@@ -239,6 +239,18 @@ public final class Shell: ShellKit.Shell, @unchecked Sendable {
     /// ``registerScriptInterpreter(name:_:)``.
     public var scriptInterpreters: [String: ScriptInterpreter] = [:]
 
+    // MARK: - Binary interpreters
+
+    /// Interpreters keyed by an embedder-chosen name, matched against a
+    /// file's leading bytes. Consulted by the dispatcher when a
+    /// path-invoked simple command is a regular executable file whose
+    /// magic number one of them claims — the binary counterpart to
+    /// ``scriptInterpreters``, which can only match a `#!`-shebang.
+    /// Empty by default; register via
+    /// ``registerBinaryInterpreter(_:)`` /
+    /// ``registerBinaryInterpreter(name:magic:_:)``.
+    public var binaryInterpreters: [String: BinaryInterpreter] = [:]
+
     // MARK: - Filesystem
 
     /// The filesystem the shell reads and writes through. Defaults
@@ -572,6 +584,7 @@ public final class Shell: ShellKit.Shell, @unchecked Sendable {
         bash.traps = traps
         bash.currentSource = currentSource
         bash.scriptInterpreters = scriptInterpreters
+        bash.binaryInterpreters = binaryInterpreters
         bash.interactivePresenter = interactivePresenter
         bash.interactive = interactive
         bash.stdoutIsTTY = stdoutIsTTY

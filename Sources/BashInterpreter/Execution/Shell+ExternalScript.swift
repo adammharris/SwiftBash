@@ -2,13 +2,15 @@ import Foundation
 
 extension Shell {
 
-    // Try dispatching `argv[0]` as a path-invoked external script.
+    // Try dispatching `argv[0]` as a path-invoked external program.
     //
-    // Returns the script's exit status when handled (file exists, has
-    // a `#!`-shebang, and an interpreter is registered for it).
-    // Returns `nil` only when the candidate isn't path-shaped, or
-    // when the file exists but has no recognised shebang — both fall
-    // through to the caller's `command not found` branch.
+    // Returns its exit status when handled — either the file's leading
+    // bytes matched a registered ``BinaryInterpreter``, or it has a
+    // `#!`-shebang with a registered ``ScriptInterpreter``, or it's
+    // plain text we interpret as bash. Returns `nil` only when the
+    // candidate isn't path-shaped, or when the file exists but nothing
+    // claims it — both fall through to the caller's `command not
+    // found` branch.
     //
     // Behaviour mirrors the kernel's `binfmt_script` plus bash's own
     // permission-error reporting:
@@ -23,19 +25,26 @@ extension Shell {
     //   diagnostic, NOT `command not found` — the path exists in the
     //   user's command line, masking the failure as a lookup miss is
     //   unhelpful
-    // - file present but no shebang → `nil` (might be a binary; let
-    //   the caller fall through)
+    // - file's leading bytes match a registered `BinaryInterpreter` →
+    //   dispatched to it (checked first — a magic number is a stronger
+    //   claim than any heuristic below, and matching it lets us skip
+    //   reading the rest of what may be a very large file)
+    // - file present, no magic match, no shebang → `nil` (might be a
+    //   binary nothing claims; let the caller fall through)
     // - shebang names an interpreter that isn't registered → `nil`
     //
     // Sequential pipeline (path-shape check → metadata → permission
-    // gate → file read → shebang parse → interpreter dispatch →
-    // optional bash-fallback). Splitting per-stage would scatter the
-    // shared `head`/`meta`/`data`/`raw`/`shebangLine` locals.
+    // gate → magic probe → binary dispatch → file read → shebang parse
+    // → interpreter dispatch → optional bash-fallback). Splitting
+    // per-stage would scatter the shared
+    // `head`/`meta`/`data`/`raw`/`shebangLine` locals.
     // swiftlint:disable:next function_body_length
     func dispatchAsExternalScriptIfApplicable(
         argv: [String]
     ) async throws -> ExitStatus? {
-        guard !scriptInterpreters.isEmpty else { return nil }
+        guard !scriptInterpreters.isEmpty || !binaryInterpreters.isEmpty else {
+            return nil
+        }
         guard let head = argv.first, looksLikePath(head) else { return nil }
 
         let resolved = resolvePath(head)
@@ -81,6 +90,42 @@ extension Shell {
             return ExitStatus(126)
         }
         #endif
+        // Magic-number probe, before any full read. A binary that a
+        // registered interpreter claims is dispatched on the strength
+        // of a bounded prefix, so invoking a 10 MB wasm module costs
+        // one small read here and nothing more — the interpreter gets
+        // the path and loads it however it likes.
+        //
+        // Checked ahead of the shebang parse because a magic number is
+        // an unambiguous self-identification where the tests below are
+        // heuristics. An embedder that registers `#!` as a magic
+        // therefore shadows shebang dispatch entirely; that is its
+        // choice to make, and no real binary format claims those bytes.
+        if !binaryInterpreters.isEmpty {
+            let probe: Data
+            do {
+                probe = try await readPrefix(resolved, count: binaryProbeLength)
+            } catch let err as FileSystemError {
+                stderr(
+                    "\(errorLocationPrefix())\(head): \(err.shellMessage())\n")
+                return ExitStatus(126)
+            }
+            if let interpreter = matchingBinaryInterpreter(for: probe) {
+                // Same subshell reasoning as the shebang path below:
+                // an interpreter mutates `positionalParameters` and
+                // `scriptName`, and those must not leak into the
+                // parent.
+                let context = BinaryInterpreterContext(
+                    path: resolved, prefix: probe, argv: argv)
+                let sub = copy()
+                sub.scriptName = resolved
+                sub.positionalParameters = Array(argv.dropFirst())
+                return try await sub.withCurrent {
+                    try await interpreter.run(context)
+                }
+            }
+        }
+
         let data: Data
         do {
             data = try await fileSystem.readData(resolved)
@@ -139,6 +184,24 @@ extension Shell {
         }
 
         return nil
+    }
+
+    /// Read at most `count` bytes from the head of `path`.
+    ///
+    /// Goes through ``FileSystem/openRead(_:)`` rather than
+    /// ``FileSystem/readData(_:)`` so a filesystem that implements real
+    /// streaming reads only touches the prefix. The protocol's default
+    /// `openRead` buffers the whole file, in which case this costs the
+    /// same as `readData` — correct either way, cheap where the
+    /// embedder made it cheap.
+    private func readPrefix(_ path: String, count: Int) async throws -> Data {
+        let source = try await fileSystem.openRead(path)
+        var buffer = Data()
+        for await chunk in source.bytes {
+            buffer.append(chunk)
+            if buffer.count >= count { break }
+        }
+        return buffer.count > count ? Data(buffer.prefix(count)) : buffer
     }
 
     /// Heuristic for "this file is a script the shell should
