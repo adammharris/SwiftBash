@@ -24,9 +24,16 @@ import PackageDescription
 // target conditions swift-subprocess out on iOS (the kernel bans
 // posix_spawn there), so on this platform it links nothing at all.
 //
-// ShellKit is pinned by revision, not `branch: "main"` as upstream has it.
-// A floating branch two levels deep is not something this project wants in
-// its dependency graph — same reasoning as the WasmKit pin.
+// ShellKit is still pinned by revision, not `branch: "main"` as upstream has
+// it — a floating branch two levels deep is not something this project wants
+// in its dependency graph, same reasoning as the WasmKit pin. What changed is
+// whose revision: it is our fork's now. See the note on the dependency below.
+//
+// A URL rather than `path: "../ShellKit"`, so this package still resolves
+// standalone — `swift test` here does not require anything beside it. Wish
+// vendors the same fork as a submodule and declares it as a local package, so
+// the app builds from `Vendor/ShellKit`, which overrides this pin. A change
+// there is not in this build until it is pushed and the revision below moves.
 
 let package = Package(
     name: "SwiftBash",
@@ -45,8 +52,16 @@ let package = Package(
         // Environment, the Command protocol, ProcessTable, BinCatalog, and
         // the `Shell.current` TaskLocal. SwiftBash subclasses
         // `ShellKit.Shell` to add bash-specific state on top.
-        .package(url: "https://github.com/Cocoanetics/ShellKit",
-                 revision: "ce2147463e7f08732112bb8929cd79944942f9d9"),
+        //
+        // Fork of Cocoanetics/ShellKit, branched at the revision this used to
+        // pin. `HostInfo.real()` read the host name from
+        // `ProcessInfo.hostName`, which on Apple platforms resolves the
+        // machine's own name over mDNS — and since that call sits inside the
+        // default value of the `Shell.current` task local, the first command
+        // run in the app tripped iOS's local-network permission prompt for a
+        // string nothing here ever reads. It reads `uname(2)` now.
+        .package(url: "https://github.com/adammharris/ShellKit",
+                 revision: "d609b2b66b01b60ee1243f62b29a6ebf3c5228d5"),
     ],
     targets: [
         // `<sys/xattr.h>` — Linux's stock Glibc module doesn't surface the
